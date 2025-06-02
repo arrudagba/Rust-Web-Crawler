@@ -230,7 +230,7 @@ fn parse_args() -> Result<Config, io::Error> {
             \t-f, --file [filename]        Write visited URLs to file (default: output.txt)\n\
             \t-fj, --file-json [filename]  Write visited URLs to JSON file (default: output.json)\n\
             \t-e, --request-error          Display/Save the URLs that have returned error in the request(default: disabled)\n\
-            \t-v, --verbose                Enable verbose logging during the crawl.
+            \t-v, --verbose                Enable verbose logging during the crawl.\n\
             \t-h, --help                   Display this help message and exit\n\
             \n\
             Examples:\n\
@@ -240,6 +240,7 @@ fn parse_args() -> Result<Config, io::Error> {
             \tweb_crawler https://example.com -f results.txt -d 3\n\
             \tweb_crawler https://example.com -fj results.json\n\
             \tweb_crawler https://example.com -e\n\
+            \tweb_crawler https://example.com -v\n\
             \n\
             This tool crawls a website starting from the provided URL, collecting internal links recursively.\n\
             Use depth to limit the recursion, and file to save the results."
