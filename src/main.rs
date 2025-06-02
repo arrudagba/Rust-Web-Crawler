@@ -2,12 +2,12 @@ use std::env;
 use std::fs::File;
 use std::io::{self, Write};
 use std::collections::{HashSet};
-use std::time::Duration;
 use reqwest;
+use std::error::Error;
+use env_logger::{Builder, Target};
 use scraper::{Html, Selector};
 use url::Url;
 use serde::Serialize;
-use indicatif::{ProgressBar, ProgressStyle};
 
 enum OutputFormat {
     PlainText(File),
@@ -17,6 +17,8 @@ enum OutputFormat {
 struct Config {
     root_url: String,
     depth: i32,
+    verbose: bool,
+    response_error: bool,
     output_file: Option<OutputFormat>,
 }
 
@@ -28,9 +30,8 @@ struct CrawlOutput<'a> {
 
 #[tokio::main]
 async fn main() -> Result<(), reqwest::Error> {
-    env_logger::init();
+    Builder::from_env(env_logger::Env::default().default_filter_or("info")).target(Target::Stderr).init();
 
-    let pb = ProgressBar::new_spinner();
     let config = parse_args().expect("Failed to parse arguments");
 
     let html = get_html(&config.root_url).await?;
@@ -39,13 +40,7 @@ async fn main() -> Result<(), reqwest::Error> {
 
     let mut visited: HashSet<String> = HashSet::new();
     let mut to_visit: Vec<String> = links.clone();
-
-    // Set up the loading spinner
-    pb.set_message("Crawling...");
-    pb.enable_steady_tick(Duration::from_millis(120));
-    pb.set_style(ProgressStyle::default_spinner()
-        .tick_chars("⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏ ")
-        .template("{spinner:.green} {msg}").unwrap());
+    let mut error_links: Vec<String> = Vec::new();
     
     // Main crawling loop
     while !to_visit.is_empty() {
@@ -53,6 +48,19 @@ async fn main() -> Result<(), reqwest::Error> {
         to_visit.clear();
 
         for link in current_layer {
+            // Skip if the link had a request error
+            if error_links.contains(&link){
+                visited.remove(&link);
+                continue;
+            }
+
+            // Prints any link except already printed
+            if !visited.contains(&link){
+                if config.verbose{
+                        log::info!("{:?}", &link);
+                }
+            }
+
             // Skip if already visited, from another domain, or over depth limit
             if visited.contains(&link) || !is_same_domain(&config.root_url, &link) || depth_control(&link, config.depth) {
                 visited.insert(link);
@@ -65,7 +73,15 @@ async fn main() -> Result<(), reqwest::Error> {
                     visited.insert(link.clone());
                     get_links(&html, &link, &mut to_visit);
                 }
-                Err(e) => log::error!("{:?}", e),
+                Err(e) => {
+                    error_links.push(link.clone());
+                    visited.remove(&link);
+                    log::error!("{:?}", format_reqwest_error(&e));
+                    // Print error if user sets arg "-e"
+                    if config.response_error{
+                        log::info!("{:?}", &link);
+                    }
+                },
             }
         }
     }
@@ -89,13 +105,26 @@ async fn main() -> Result<(), reqwest::Error> {
         }
     }
 
-    // Print all visited links to the log
-    for link in visited.iter() {
-        log::info!("{:?}", link);
+    // Add response error URLs if arg "-e" is set by user 
+    if config.response_error{
+        for item in error_links{
+            visited.insert(item);
+        }
     }
 
-    pb.finish_with_message("Crawling completed.");
+    if !config.verbose {
+        // Print all logs first
+        for link in visited.iter() {
+            log::info!("{:?}", link);
+        }
+        
+        println!("Crawling completed!");
+    }
+    else{
+        println!("Crawling completed!");
+    }
 
+    
     Ok(())
 }
 
@@ -183,7 +212,7 @@ fn get_links(html: &str, url: &str, results: &mut Vec<String>) {
 }
 
 /// Parses command-line arguments and returns the configuration for the crawler.
-/// Supports flags for crawl depth, output file (plain or JSON), and help.
+/// Supports flags for crawl depth, output file (plain or JSON), display error URLs, verbose and help.
 fn parse_args() -> Result<Config, io::Error> {
     let args: Vec<String> = env::args().collect();
 
@@ -197,10 +226,12 @@ fn parse_args() -> Result<Config, io::Error> {
             "Usage: web_crawler [options] <url>\n\
             \n\
             Options:\n\
-            \t-d, --depth <n>            Limit the crawl depth (default: 0)\n\
-            \t-f, --file [filename]      Write visited URLs to file (default: output.txt)\n\
-            \t-fj, --file-json [filename] Write visited URLs to JSON file (default: output.json)\n\
-            \t-h, --help                 Display this help message and exit\n\
+            \t-d, --depth <n>              Limit the crawl depth (default: 0)\n\
+            \t-f, --file [filename]        Write visited URLs to file (default: output.txt)\n\
+            \t-fj, --file-json [filename]  Write visited URLs to JSON file (default: output.json)\n\
+            \t-e, --request-error          Display/Save the URLs that have returned error in the request(default: disabled)\n\
+            \t-v, --verbose                Enable verbose logging during the crawl.
+            \t-h, --help                   Display this help message and exit\n\
             \n\
             Examples:\n\
             \tweb_crawler https://example.com\n\
@@ -208,6 +239,7 @@ fn parse_args() -> Result<Config, io::Error> {
             \tweb_crawler https://example.com -f\n\
             \tweb_crawler https://example.com -f results.txt -d 3\n\
             \tweb_crawler https://example.com -fj results.json\n\
+            \tweb_crawler https://example.com -e\n\
             \n\
             This tool crawls a website starting from the provided URL, collecting internal links recursively.\n\
             Use depth to limit the recursion, and file to save the results."
@@ -217,6 +249,8 @@ fn parse_args() -> Result<Config, io::Error> {
 
     let root_url = args[1].clone();
     let mut depth: i32 = 0;
+    let mut verbose: bool = false;
+    let mut response_error: bool = false;
     let mut output_file: Option<OutputFormat> = None;
 
     let mut i = 2;
@@ -253,6 +287,14 @@ fn parse_args() -> Result<Config, io::Error> {
                 output_file = Some(OutputFormat::Json(File::create(&filename)?));
                 i += 1;
             }
+            "-v" | "--v" =>{
+                verbose = true;
+                i += 1;
+            }
+            "-e" | "--e" =>{
+                response_error = true;
+                i += 1;
+            }
             _ => {
                 eprintln!("Unknown option: {}", args[i]);
                 std::process::exit(1);
@@ -263,6 +305,36 @@ fn parse_args() -> Result<Config, io::Error> {
     Ok(Config {
         root_url,
         depth,
+        verbose,
+        response_error,
         output_file,
     })
+}
+
+/// Format the reqwest::Error so it can be readable
+/// e.g., format_reqwet_error("reqwest::Error { kind: Status(404), url: "https://example.com/" }") -> "HTTP error: 404 | URL: https://example.com/"
+fn format_reqwest_error(e: &reqwest::Error) -> String {
+    let mut msg = String::new();
+
+    if let Some(status) = e.status() {
+        msg.push_str(&format!("HTTP error: {}", status));
+    } else if e.is_timeout() {
+        msg.push_str("Timeout error");
+    } else if e.is_connect() {
+        msg.push_str("Connection error");
+    } else if e.is_request() {
+        msg.push_str("Request error");
+    } else {
+        msg.push_str("Unknown error");
+    }
+
+    if let Some(url) = e.url() {
+        msg.push_str(&format!(" | URL: {}", url));
+    }
+
+    if let Some(source) = e.source() {
+        msg.push_str(&format!(" | Caused by: {}", source));
+    }
+
+    msg
 }
